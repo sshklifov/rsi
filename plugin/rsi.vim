@@ -15,14 +15,14 @@ function! s:DefineOption(name, def)
 endfunction
 
 call s:DefineOption('g:rsi_file', 'rsi.txt')
-call s:DefineOption('g:rsi_work_secs', 1800)
-call s:DefineOption('g:rsi_rest_secs', 40)
-call s:DefineOption('g:rsi_reset_secs', 150)
+call s:DefineOption('g:rsi_work_secs', 60 * 28)
+call s:DefineOption('g:rsi_rest_secs', 45)
+call s:DefineOption('g:rsi_reset_secs', 120)
 
-let s:global_timestamp = stdpath("state") .. "/rsa.txt"
+let s:rsi_file = stdpath("state") .. "/rsi.txt"
 
-function RsiDebug()
-  return s:
+function! RsiDebug()
+  return copy(s:)
 endfunction
 
 function! RsiEnterWork()
@@ -35,10 +35,7 @@ endfunction
 
 function! RsiEnterRest()
   let now = localtime()
-  let overwork = now - s:last_time - s:period
-  if s:working && s:expired
-    echo "Overworked " .. overwork .. "s."
-  endif
+  call s:RegisterRestPeriod(now, now + g:rsi_rest_secs)
   let s:last_time = now
   let s:period = g:rsi_rest_secs
   let s:working = 0
@@ -46,52 +43,145 @@ function! RsiEnterRest()
   call s:UpdateStatus()
 endfunction
 
-function! s:OnCursorMoved()
-  let now = localtime()
-  let s:last_cursor_moved = now
-  if !s:working && s:expired
-    call RsiEnterWork()
+function! s:RegisterRestPeriod(from, to)
+  if !exists('s:rests_made')
+    let s:rests_made = []
   endif
-  call jobstart("touch " .. s:global_timestamp)
+  call add(s:rests_made, [a:from, a:to])
 endfunction
 
-function! s:UpdateStatus()
+function! RsiPrintStats()
+  if !exists('s:rests_made')
+    echo "No stats"
+    return
+  endif
+  let total_rest = s:rests_made[0][1] - s:rests_made[0][0]
+  let total_work = 0
+  let worked_time = []
+  for idx in range(1, len(s:rests_made)-1)
+    let total_rest += s:rests_made[idx][1] - s:rests_made[idx][0]
+    let work_time = s:rests_made[idx][0] - s:rests_made[idx-1][1]
+    call add(worked_time, work_time)
+    let total_work += work_time
+  endfor
+  call reverse(sort(worked_time, 'n'))
+  call map(worked_time, 's:Format(v:val)')
+  echo "RSI stats..."
+  echo "Total resting time: " .. s:Format(total_rest)
+  echo "Total working time: " .. s:Format(total_work)
+  for item in worked_time
+    echo "Work period: " .. item
+  endfor
+endfunction
+
+function! s:OnFocusGained()
+  let then = getftime(s:rsi_file)
+  let now = localtime()
+  let elapsed = now - then
+  call s:RestoreState()
+  if elapsed > g:rsi_reset_secs
+    let msg = s:Format(elapsed) .. " passed with no activity. Count as rest? "
+    let opts = #{prompt: msg, text: "y", cancelreturn: "n"}
+    if input(opts)[0] !=? 'n'
+      call s:RegisterRestPeriod(then, now)
+      call RsiEnterWork()
+    endif
+  endif
+  call s:UpdateStatus()
+
+  call jobstart("touch " .. s:rsi_file)
+endfunction
+
+function! s:OnFocusLost()
+  call s:FlushState()
+endfunction
+
+function! s:FlushState()
+  " Filter s:rests_made to match today only
+  let now = strftime("%F", localtime())
+  if exists('s:rests_made')
+    call filter(s:rests_made, 'strftime("%F", v:val[1]) == now')
+  endif
+  " Write out all script local variables
+  call writefile([string(s:)], s:rsi_file)
+endfunction
+
+function! s:RestoreState()
+  let cache = readfile(s:rsi_file)
+  if len(cache) > 0
+    let dict = eval(cache[0])
+    for varname in keys(dict)
+      let s:[varname] = dict[varname]
+    endfor
+  endif
+endfunction
+
+function RsiPeriod()
+  let secs = localtime() - s:last_time
+  return s:Format(secs)
+endfunction
+
+function s:Format(x)
+  let secs = a:x % 60
+  let mins = (a:x / 60) % 60
+  let hrs = (a:x / 60 / 60)
+  if hrs > 0
+    return printf("%dh %dm %ds", hrs, mins, secs)
+  elseif mins > 0
+    return printf("%dm %ds", mins, secs)
+  else
+    return printf("%ds", secs)
+  endif
+endfunction
+
+function s:UpdateStatus(...)
   let now = localtime()
   let elapsed = now - s:last_time
   let percentage = elapsed * 10 / s:period
   if percentage < 10 && !s:expired
     let state = s:working ? "Working " : "Resting "
-    let g:statusline_dict['rsi'] = state .. percentage .. '/10'
+    let status = state .. percentage .. '/10'
   else
     let s:expired = 1
-    let g:statusline_dict['rsi'] = ''
+    if s:working
+      let status = 'Stop'
+    else
+      let status = 'Transition'
+      augroup Rsi
+        autocmd! CursorMoved,CursorMovedI,InsertEnter,InsertLeave * ++once call RsiEnterWork()
+      augroup END
+    endif
   endif
-
-  let elapsed = now - s:last_cursor_moved
-  if elapsed > g:rsi_reset_secs
-    let global_cursor_moved = getftime(s:global_timestamp)
-    if global_cursor_moved > s:last_cursor_moved
-      let s:last_cursor_moved = global_cursor_moved
-    endif
-    let elapsed = now - s:last_cursor_moved
-    if s:working && elapsed > g:rsi_reset_secs
-      let s:working = 0
-      let s:expired = 1
-    endif
+  if !has_key(g:statusline_dict, 'rsi') || g:statusline_dict['rsi'] != status
+    let g:statusline_dict['rsi'] = status
   endif
 endfunction
 
-function! s:MainLoop(...)
-  call s:UpdateStatus()
-  " Reset activity detection. The '++once' is crucial here - this is in
-  " the main loop so the callback is triggered at most once per tick.
+function s:CommonDivisor(x, y)
+  if a:y == 0
+    return a:x
+  endif
+  return s:CommonDivisor(a:y, a:x % a:y)
+endfunction
+
+function! s:TickRate()
+  let tick_sec = s:CommonDivisor(g:rsi_rest_secs, g:rsi_work_secs) / 10.0
+  let tick_msec = float2nr(tick_sec * 1000)
+  return tick_msec
+endfunction
+
+function s:OnVimEnter()
+  call s:OnFocusGained()
+  call timer_start(s:TickRate(), 's:UpdateStatus', #{repeat: -1})
+
   augroup Rsi
-    autocmd! CursorMoved,CursorMovedI,InsertEnter,InsertLeave * ++once call s:OnCursorMoved()
+    autocmd! FocusLost * call s:OnFocusLost()
+    autocmd! FocusGained * call s:OnFocusGained()
+    autocmd! VimLeavePre * ++once call s:OnFocusLost()
   augroup END
 endfunction
 
-let s:last_cursor_moved = localtime()
-call RsiEnterWork()
-redrawstatus
+augroup Rsi
+  autocmd! VimEnter * ++once call s:OnVimEnter()
+augroup END
 
-call timer_start(1000, 's:MainLoop', #{repeat: -1})
