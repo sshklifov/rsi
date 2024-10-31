@@ -25,8 +25,21 @@ function! RsiDebug()
   return copy(s:)
 endfunction
 
+function! RsiReset()
+  let s:rests_made = []
+  let s:rest_point = 0
+  let s:date = strftime("%F")
+  call RsiEnterWork()
+endfunction
+
 function! RsiEnterWork()
-  let s:last_time = localtime()
+  let now = localtime()
+  if s:rest_point > 0
+    call s:RegisterRestPeriod(s:rest_point, now)
+  endif
+  let s:rest_point = 0
+
+  let s:last_time = now
   let s:period = g:rsi_work_secs
   let s:working = 1
   let s:expired = 0
@@ -35,7 +48,7 @@ endfunction
 
 function! RsiEnterRest()
   let now = localtime()
-  call s:RegisterRestPeriod(now, now + g:rsi_rest_secs)
+  let s:rest_point = now
   let s:last_time = now
   let s:period = g:rsi_rest_secs
   let s:working = 0
@@ -51,7 +64,7 @@ function! s:RegisterRestPeriod(from, to)
 endfunction
 
 function! RsiPrintStats()
-  if !exists('s:rests_made')
+  if get(s:, 'rests_made', []) == []
     echo "No stats"
     return
   endif
@@ -79,7 +92,12 @@ function! s:OnFocusGained()
   let now = localtime()
   let elapsed = now - then
   call s:RestoreState()
-  if elapsed > g:rsi_reset_secs
+
+  let expected_date = strftime("%F", now)
+  if s:date != expected_date
+    call RsiReset()
+  elseif elapsed > g:rsi_reset_secs
+    " TODO bug
     let msg = s:Format(elapsed) .. " passed with no activity. Count as rest? "
     let opts = #{prompt: msg, text: "y", cancelreturn: "n"}
     if input(opts)[0] !=? 'n'
@@ -88,20 +106,15 @@ function! s:OnFocusGained()
     endif
   endif
   call s:UpdateStatus()
-
   call jobstart("touch " .. s:rsi_file)
 endfunction
 
 function! s:OnFocusLost()
   call s:FlushState()
+  call jobstart("touch " .. s:rsi_file)
 endfunction
 
 function! s:FlushState()
-  " Filter s:rests_made to match today only
-  let now = strftime("%F", localtime())
-  if exists('s:rests_made')
-    call filter(s:rests_made, 'strftime("%F", v:val[1]) == now')
-  endif
   " Write out all script local variables
   call writefile([string(s:)], s:rsi_file)
 endfunction
@@ -184,4 +197,3 @@ endfunction
 augroup Rsi
   autocmd! VimEnter * ++once call s:OnVimEnter()
 augroup END
-
