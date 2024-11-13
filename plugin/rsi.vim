@@ -28,7 +28,7 @@ endfunction
 function! RsiReset()
   let s:rests_made = []
   let s:rest_point = 0
-  let s:date = strftime("%F")
+  let s:start_point = localtime()
   call RsiEnterWork()
 endfunction
 
@@ -68,23 +68,29 @@ function! RsiPrintStats()
     echo "No stats"
     return
   endif
-  let total_rest = s:rests_made[0][1] - s:rests_made[0][0]
-  let total_work = 0
-  let worked_time = []
-  for idx in range(1, len(s:rests_made)-1)
-    let total_rest += s:rests_made[idx][1] - s:rests_made[idx][0]
-    let work_time = s:rests_made[idx][0] - s:rests_made[idx-1][1]
-    call add(worked_time, work_time)
-    let total_work += work_time
-  endfor
-  call reverse(sort(worked_time, 'n'))
-  call map(worked_time, 's:Format(v:val)')
   echo "RSI stats..."
-  echo "Total resting time: " .. s:Format(total_rest)
-  echo "Total working time: " .. s:Format(total_work)
-  for item in worked_time
-    echo "Work period: " .. item
+
+  let total_rest = 0
+  let total_work = 0
+  let work_point = s:start_point
+  for [rest_begin, rest_end] in s:rests_made
+    let rest_secs = rest_end - rest_begin
+    let total_rest += rest_secs
+    if work_point > rest_begin
+      throw "Invalid state, check " .. s:rsi_file
+    endif
+    let work_secs = rest_begin - work_point
+    let total_work += work_secs
+    echo "Worked from " .. strftime("%H:%M", work_point) .. " to " .. strftime("%H:%M", rest_begin) .. "."
+    if work_secs > g:rsi_work_secs
+      echo "Overworked " .. s:Format(work_secs - g:rsi_work_secs) .. "!"
+    endif
+    let work_point = rest_end
+    echo "Rested " .. s:Format(rest_secs) .. "."
   endfor
+  echo "Total working time: " .. s:Format(total_work)
+  echo "Total resting time: " .. s:Format(total_rest)
+  echo "Total: " .. s:Format(total_work + total_rest)
 endfunction
 
 function! s:OnFocusGained()
