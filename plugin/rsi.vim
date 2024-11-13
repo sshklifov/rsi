@@ -99,18 +99,29 @@ function! s:OnFocusGained()
   let elapsed = now - then
   call s:RestoreState()
 
-  let expected_date = strftime("%F", now)
-  if s:date != expected_date
-    call RsiReset()
-  elseif elapsed > g:rsi_reset_secs
-    " TODO bug
-    let msg = s:Format(elapsed) .. " passed with no activity. Count as rest? "
-    let opts = #{prompt: msg, text: "y", cancelreturn: "n"}
-    if input(opts)[0] !=? 'n'
-      call s:RegisterRestPeriod(then, now)
-      call RsiEnterWork()
+  if !s:prompt
+    let expected_date = strftime("%F", now)
+    if strftime("%F", s:start_point) != expected_date
+      call RsiReset()
+    elseif elapsed > g:rsi_reset_secs
+      let msg = s:Format(elapsed) .. " passed with no activity (and counting). Mark as rest? "
+      let opts = #{prompt: msg, text: "y", cancelreturn: "n"}
+      " Show to other instances there is an open prompt
+      let s:prompt = 1
+      call s:FlushState()
+      let user_response = input(opts)[0]
+      let s:prompt = 0
+      " Cher user input
+      if user_response !=? 'n'
+        " Recalculate current time
+        let now = localtime()
+        call s:RegisterRestPeriod(then, now)
+        call RsiEnterWork()
+      endif
+      call s:FlushState()
     endif
   endif
+
   call s:UpdateStatus()
   call jobstart("touch " .. s:rsi_file)
 endfunction
@@ -154,23 +165,28 @@ function s:Format(x)
 endfunction
 
 function s:UpdateStatus(...)
-  let now = localtime()
-  let elapsed = now - s:last_time
-  let percentage = elapsed * 10 / s:period
-  if percentage < 10 && !s:expired
-    let state = s:working ? "Working " : "Resting "
-    let status = state .. percentage .. '/10'
+  if s:prompt
+    let status = 'Prompt'
   else
-    let s:expired = 1
-    if s:working
-      let status = 'Stop'
+    let now = localtime()
+    let elapsed = now - s:last_time
+    let percentage = elapsed * 10 / s:period
+    if percentage < 10 && !s:expired
+      let state = s:working ? "Working " : "Resting "
+      let status = state .. percentage .. '/10'
     else
-      let status = 'Transition'
-      augroup Rsi
-        autocmd! CursorMoved,CursorMovedI,InsertEnter,InsertLeave * ++once call RsiEnterWork()
-      augroup END
+      let s:expired = 1
+      if s:working
+        let status = 'Stop'
+      else
+        let status = 'Transition'
+        augroup Rsi
+          autocmd! CursorMoved,CursorMovedI,InsertEnter,InsertLeave * ++once call RsiEnterWork()
+        augroup END
+      endif
     endif
   endif
+
   if !has_key(g:statusline_dict, 'rsi') || g:statusline_dict['rsi'] != status
     let g:statusline_dict['rsi'] = status
   endif
