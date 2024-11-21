@@ -20,8 +20,6 @@ call s:DefineOption('g:rsi_rest_secs', 45)
 call s:DefineOption('g:rsi_reset_secs', 120)
 
 let s:rsi_file = stdpath("state") .. "/rsi.txt"
-" TODO MUHAHAHAHAHA
-" let s:rpc_file = stdpath("state") .. "/rsi.txt"
 
 function! RsiDebug()
   return copy(s:)
@@ -42,6 +40,7 @@ function! RsiEnterWork()
   if exists('s:period_start')
     call s:RegisterRestPeriod(s:period_start, now)
   endif
+  let s:last_activity = now
   let s:period_start = now
   let s:working = 1
   call s:UpdateStatus()
@@ -49,6 +48,7 @@ endfunction
 
 function! RsiEnterRest()
   let now = localtime()
+  let s:last_activity = now
   let s:period_start = now
   let s:working = 0
   call s:UpdateStatus()
@@ -94,6 +94,7 @@ function! RsiPrintStats()
 endfunction
 
 function! s:OnVimLeave()
+  call jobstop(s:monitor_job)
   call s:FlushState()
 endfunction
 
@@ -104,7 +105,7 @@ function! s:FlushState()
 endfunction
 
 function! s:SavedVars()
-  return ['rests_made', 'stats_start', 'period_start', 'working']
+  return ['rests_made', 'stats_start', 'period_start', 'working', 'last_activity']
 endfunction
 
 function! s:RestoreState()
@@ -120,7 +121,7 @@ function! s:RestoreState()
   endif
 endfunction
 
-function RsiPeriod()
+function! RsiPeriod()
   if !exists('s:period_start')
     return '???'
   endif
@@ -140,22 +141,6 @@ function s:Format(x)
     return printf("%ds", secs)
   endif
 endfunction
-
-" elseif elapsed > g:rsi_reset_secs
-"   let msg = s:Format(elapsed) .. " passed with no activity (and counting). Mark as rest? "
-"   let opts = #{prompt: msg, text: "y", cancelreturn: "n"}
-"   " Show to other instances there is an open prompt
-"   call s:FlushState()
-"   let user_response = input(opts)[0]
-"   " Cher user input
-"   if user_response !=? 'n'
-"     " Recalculate current time
-"     let now = localtime()
-"     call s:RegisterRestPeriod(then, now)
-"     call RsiEnterWork()
-"   endif
-"   call s:FlushState()
-" endif
 
 function s:UpdateStatus(...)
   let now = localtime()
@@ -195,7 +180,44 @@ function! s:TickRate()
   return tick_msec
 endfunction
 
-function s:OnVimEnter()
+function! s:MonitorKdeActivity()
+  let cmd = ["dbus-monitor", "interface=org.kde.KWin.VirtualDesktopManager,member=currentChanged"]
+  let opts = #{on_stdout: 's:OnActivity'}
+  let s:monitor_job = jobstart(cmd, opts)
+  if s:monitor_job <= 0
+    call init#Warn('RSI: Not monitoring for activity')
+  endif
+endfunction
+
+function! s:MonitorVimActivity(...)
+  augroup Rsi
+    autocmd! CursorMoved,CursorMovedI,InsertEnter,InsertLeave * ++once call s:OnActivity()
+  augroup END
+endfunction
+
+function s:OnActivity(...)
+  let now = localtime()
+  if !exists('s:last_activity')
+    let s:last_activity = now
+    return
+  endif
+
+  let elapsed = now - s:last_activity
+  let s:last_activity = now
+  if elapsed <= g:rsi_reset_secs || !s:working
+    return
+  endif
+
+  let msg = s:Format(elapsed) .. " passed with no activity (and counting). Mark as rest? "
+  let user_response = input(#{prompt: msg, text: "y", cancelreturn: "n"})[0]
+  if user_response !=? 'n'
+    " Recalculate current time
+    call s:RegisterRestPeriod(s:last_activity, localtime())
+    call RsiEnterWork()
+  endif
+endfunction
+
+function! s:OnVimEnter()
   call s:RestoreState()
   let expected_date = strftime("%F")
   if !exists('s:stats_start') || strftime("%F", s:stats_start) != expected_date
@@ -205,11 +227,20 @@ function s:OnVimEnter()
   call s:UpdateStatus()
   call timer_start(s:TickRate(), 's:UpdateStatus', #{repeat: -1})
 
+  call s:MonitorKdeActivity()
+  call timer_start(1000, 's:MonitorVimActivity', #{repeat: -1})
+
   augroup Rsi
     autocmd! VimLeavePre * ++once call s:OnVimLeave()
   augroup END
 endfunction
 
-augroup Rsi
-  autocmd! VimEnter * ++once call s:OnVimEnter()
-augroup END
+function RsiEnable()
+  if v:vim_did_enter
+    call s:OnVimEnter()
+  else
+    augroup Rsi
+      autocmd! VimEnter * ++once call s:OnVimEnter()
+    augroup END
+  endif
+endfunction
