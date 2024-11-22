@@ -94,7 +94,9 @@ function! RsiPrintStats()
 endfunction
 
 function! s:OnVimLeave()
-  call jobstop(s:monitor_job)
+  if exists('s:monitor_job')
+    call jobstop(s:monitor_job)
+  endif
   call s:FlushState()
 endfunction
 
@@ -181,12 +183,17 @@ function! s:TickRate()
 endfunction
 
 function! s:MonitorKdeActivity()
+  if !empty($SSH_CONNECTION)
+    return v:false
+  endif
   let cmd = ["dbus-monitor", "interface=org.kde.KWin.VirtualDesktopManager,member=currentChanged"]
   let opts = #{on_stdout: 's:OnActivity'}
-  let s:monitor_job = jobstart(cmd, opts)
-  if s:monitor_job <= 0
-    call init#Warn('RSI: Not monitoring for activity')
+  let id = jobstart(cmd, opts)
+  if id <= 0
+    return v:false
   endif
+  let s:monitor_job = id
+  return v:true
 endfunction
 
 function! s:MonitorVimActivity(...)
@@ -227,8 +234,12 @@ function! s:OnVimEnter()
   call s:UpdateStatus()
   call timer_start(s:TickRate(), 's:UpdateStatus', #{repeat: -1})
 
-  call s:MonitorKdeActivity()
-  call timer_start(1000, 's:MonitorVimActivity', #{repeat: -1})
+  const monitor = s:MonitorKdeActivity()
+  if monitor
+    call timer_start(1000, 's:MonitorVimActivity', #{repeat: -1})
+  else
+    call init#Warn('RSI: Not monitoring for activity')
+  endif
 
   augroup Rsi
     autocmd! VimLeavePre * ++once call s:OnVimLeave()
