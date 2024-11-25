@@ -94,6 +94,12 @@ function! RsiPrintStats()
 endfunction
 
 function! s:OnVimLeave()
+  if exists('s:status_timer')
+    call timer_stop(s:status_timer)
+  endif
+  if exists('s:monitor_timer')
+    call timer_stop(s:monitor_timer)
+  endif
   if exists('s:monitor_job')
     call jobstop(s:monitor_job)
   endif
@@ -232,11 +238,11 @@ function! s:OnVimEnter()
   endif
 
   call s:UpdateStatus()
-  call timer_start(s:TickRate(), 's:UpdateStatus', #{repeat: -1})
+  let s:status_timer = timer_start(s:TickRate(), 's:UpdateStatus', #{repeat: -1})
 
   const monitor = s:MonitorKdeActivity()
   if monitor
-    call timer_start(1000, 's:MonitorVimActivity', #{repeat: -1})
+    let s:monitor_timer = timer_start(1000, 's:MonitorVimActivity', #{repeat: -1})
   else
     call init#Warn('RSI: Not monitoring for activity')
   endif
@@ -246,7 +252,7 @@ function! s:OnVimEnter()
   augroup END
 endfunction
 
-function RsiEnable()
+function! RsiEnable()
   if v:vim_did_enter
     call s:OnVimEnter()
   else
@@ -254,4 +260,13 @@ function RsiEnable()
       autocmd! VimEnter * ++once call s:OnVimEnter()
     augroup END
   endif
+endfunction
+
+function! RsiDisable()
+  augroup Rsi
+    autocmd! VimLeavePre
+    autocmd! CursorMoved,CursorMovedI,InsertEnter,InsertLeave
+  augroup END
+  call s:OnVimLeave()
+  let g:statusline_dict['rsi'] = ''
 endfunction
