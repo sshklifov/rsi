@@ -129,7 +129,7 @@ function! s:RestoreState()
   endif
 endfunction
 
-function! RsiPeriod()
+function! RsiPrintPeriod()
   if !exists('s:period_start')
     return '???'
   endif
@@ -270,3 +270,24 @@ function! RsiDisable()
   call s:OnVimLeave()
   let g:statusline_dict['rsi'] = ''
 endfunction
+
+function! RsiCompl(ArgLead, CmdLine, CursorPos)
+  if a:CursorPos < len(a:CmdLine)
+    return []
+  endif
+  let subc = ["Enable", "Disable", "Reset",
+        \ "EnterWork", "EnterRest",
+        \ "PrintStats", "PrintPeriod",
+        \ "Debug"]
+  return filter(subc, 'stridx(v:val, a:ArgLead) >= 0')
+endfunction
+
+function! s:RsiCommand(what)
+  if exists('#Rsi#VimLeavePre')
+    call eval("Rsi" .. a:what .. "()")
+  else
+    echo "Rsi plugin is not enabled."
+  endif
+endfunction
+
+command! -nargs=1 -complete=customlist,RsiCompl Rsi call s:RsiCommand(<q-args>)
