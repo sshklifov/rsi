@@ -252,7 +252,11 @@ function! s:OnVimEnter()
   augroup END
 endfunction
 
-function! RsiEnable()
+function! RsiEnable(on_ws)
+  let ws = systemlist("qdbus org.kde.KWin /KWin org.kde.KWin.currentDesktop")
+  if ws[0] != a:on_ws
+    return
+  endif
   if v:vim_did_enter
     call s:OnVimEnter()
   else
