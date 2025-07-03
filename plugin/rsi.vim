@@ -1,5 +1,7 @@
 " vim: set sw=2 ts=2 sts=2 foldmethod=marker:
 
+" TODO bug: If i am in transition and a pop appears (for the same duration) that I have rested?
+
 if exists('*RsiStatusline')
   finish
 endif
@@ -15,14 +17,14 @@ function! s:DefineOption(name, def)
 endfunction
 
 call s:DefineOption('g:rsi_file', 'rsi.txt')
-call s:DefineOption('g:rsi_work_secs', 60 * 28)
-call s:DefineOption('g:rsi_rest_secs', 45)
-call s:DefineOption('g:rsi_reset_secs', 120)
+call s:DefineOption('g:rsi_work_secs', 1680)
+call s:DefineOption('g:rsi_rest_secs', 60)
+call s:DefineOption('g:rsi_reset_secs', 900)
 
 let s:rsi_file = stdpath("state") .. "/rsi.txt"
 
 function! RsiDebug()
-  return copy(s:)
+  return deepcopy(s:)
 endfunction
 
 function! RsiReset()
@@ -36,6 +38,10 @@ function! RsiReset()
 endfunction
 
 function! RsiEnterWork()
+  augroup RsiTransition
+    autocmd!
+  augroup END
+
   let now = localtime()
   if exists('s:period_start')
     call s:RegisterRestPeriod(s:period_start, now)
@@ -161,11 +167,11 @@ function s:UpdateStatus(...)
     let status = state .. percentage .. '/10'
   else
     if s:working
-      let status = 'Stop'
+      let status = printf('Stop %dm', (elapsed - period) / 60)
     else
       let status = 'Transition'
-      augroup Rsi
-        autocmd! CursorMoved,CursorMovedI,InsertEnter,InsertLeave * ++once call RsiEnterWork()
+      augroup RsiTransition
+        autocmd! CursorMoved,CursorMovedI,InsertEnter,InsertLeave * call RsiEnterWork()
       augroup END
     endif
   endif
@@ -188,24 +194,27 @@ function! s:TickRate()
   return tick_msec
 endfunction
 
-function! s:MonitorKdeActivity()
-  if !empty($SSH_CONNECTION)
-    return v:false
-  endif
+function! s:MonitorActivity()
+  augroup Rsi
+    autocmd! CursorMoved,CursorMovedI,CmdlineChanged,InsertEnter,InsertLeave * call s:OnActivity()
+  augroup END
+
   let cmd = ["dbus-monitor", "interface=org.kde.KWin.VirtualDesktopManager,member=currentChanged"]
   let opts = #{on_stdout: 's:OnActivity'}
-  let id = jobstart(cmd, opts)
-  if id <= 0
-    return v:false
+  let s:monitor_job = jobstart(cmd, opts)
+  if s:monitor_job <= 0
+    call init#Warn('RSI: Not monitoring for KDE activity')
   endif
-  let s:monitor_job = id
-  return v:true
 endfunction
 
-function! s:MonitorVimActivity(...)
-  augroup Rsi
-    autocmd! CursorMoved,CursorMovedI,InsertEnter,InsertLeave * ++once call s:OnActivity()
-  augroup END
+function s:UpdateLastActivity()
+  let s:last_activity = localtime()
+endfunction
+
+function s:CheckInactivity()
+  if exists('s:last_activity')
+    let now = localtime()
+  endif
 endfunction
 
 function s:OnActivity(...)
@@ -221,11 +230,17 @@ function s:OnActivity(...)
     return
   endif
 
-  let msg = s:Format(elapsed) .. " passed with no activity (and counting). Mark as rest? "
-  let user_response = input(#{prompt: msg, text: "y", cancelreturn: "n"})[0]
-  if user_response !=? 'n'
+  stopinsert
+  let msg = s:Format(elapsed) .. " passed with no activity (and counting). Mark as rest?"
+  let cmd = ["kdialog", "--yesno", msg]
+  let id = jobstart(cmd)
+  let ret = jobwait([id], 10000)[0]
+  if ret == 0
     " Recalculate current time
-    call s:RegisterRestPeriod(s:last_activity, localtime())
+    call s:RegisterRestPeriod(now - elapsed, localtime())
+    if exists('s:period_start')
+      unlet s:period_start
+    endif
     call RsiEnterWork()
   endif
 endfunction
@@ -239,24 +254,14 @@ function! s:OnVimEnter()
 
   call s:UpdateStatus()
   let s:status_timer = timer_start(s:TickRate(), 's:UpdateStatus', #{repeat: -1})
-
-  const monitor = s:MonitorKdeActivity()
-  if monitor
-    let s:monitor_timer = timer_start(1000, 's:MonitorVimActivity', #{repeat: -1})
-  else
-    call init#Warn('RSI: Not monitoring for activity')
-  endif
+  call s:MonitorActivity()
 
   augroup Rsi
     autocmd! VimLeavePre * ++once call s:OnVimLeave()
   augroup END
 endfunction
 
-function! RsiEnable(on_ws)
-  let ws = systemlist("qdbus org.kde.KWin /KWin org.kde.KWin.currentDesktop")
-  if ws[0] != a:on_ws
-    return
-  endif
+function! RsiEnable()
   if v:vim_did_enter
     call s:OnVimEnter()
   else
@@ -266,10 +271,21 @@ function! RsiEnable(on_ws)
   endif
 endfunction
 
+function! RsiEnableOn(ws)
+  " TODO major bug for SSH. sometimes this returns true all the time...
+  let ws = systemlist("qdbus org.kde.KWin /KWin org.kde.KWin.currentDesktop")
+  if ws[0] != a:ws
+    return
+  endif
+  call RsiEnable()
+endfunction
+
 function! RsiDisable()
   augroup Rsi
-    autocmd! VimLeavePre
-    autocmd! CursorMoved,CursorMovedI,InsertEnter,InsertLeave
+    autocmd!
+  augroup END
+  augroup RsiTransition
+    autocmd!
   augroup END
   call s:OnVimLeave()
   let g:statusline_dict['rsi'] = ''
@@ -287,7 +303,9 @@ function! RsiCompl(ArgLead, CmdLine, CursorPos)
 endfunction
 
 function! s:RsiCommand(what)
-  if exists('#Rsi#VimLeavePre')
+  if a:what == "Enable"
+    call RsiEnable()
+  elseif exists('#Rsi#VimLeavePre')
     call eval("Rsi" .. a:what .. "()")
   else
     echo "Rsi plugin is not enabled."
