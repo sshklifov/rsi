@@ -19,7 +19,8 @@ endfunction
 call s:DefineOption('g:rsi_file', 'rsi.txt')
 call s:DefineOption('g:rsi_work_secs', 1680)
 call s:DefineOption('g:rsi_rest_secs', 60)
-call s:DefineOption('g:rsi_reset_secs', 900)
+call s:DefineOption('g:prompt_threshold_secs', 900)
+call s:DefineOption('g:reset_threshold_secs', 28800)
 
 let s:rsi_file = stdpath("state") .. "/rsi.txt"
 
@@ -27,17 +28,17 @@ function! RsiDebug()
   return deepcopy(s:)
 endfunction
 
-function! RsiReset()
+function! s:Reset()
   let s:rests_made = []
   let s:stats_start = localtime()
   if exists('s:period_start')
     unlet s:period_start
   endif
-  call RsiEnterWork()
+  call s:EnterWork()
   call s:FlushState()
 endfunction
 
-function! RsiEnterWork()
+function! s:EnterWork()
   augroup RsiTransition
     autocmd!
   augroup END
@@ -52,7 +53,7 @@ function! RsiEnterWork()
   call s:UpdateStatus()
 endfunction
 
-function! RsiEnterRest()
+function! s:EnterRest()
   let now = localtime()
   let s:last_activity = now
   let s:period_start = now
@@ -64,14 +65,16 @@ function! s:RegisterRestPeriod(from, to)
   if !exists('s:rests_made')
     let s:rests_made = []
   endif
-  if a:from < a:to
-    call add(s:rests_made, [a:from, a:to])
+  if a:from >= a:to
+    call init#Warn('RSI: Dropping invalid rest period (internal bug)!')
+  elseif len(s:rests_made) > 0 && s:rests_made[-1][1] > a:from
+    call init#Warn('RSI: Dropping invalid rest period (race condition)!')
   else
-    call init#Warn('RSI: Dropping invalid rest period!')
+    call add(s:rests_made, [a:from, a:to])
   endif
 endfunction
 
-function! RsiPrintStats()
+function! s:PrintStats()
   if get(s:, 'rests_made', []) == []
     echo "No stats"
     return
@@ -135,14 +138,6 @@ function! s:RestoreState()
   endif
 endfunction
 
-function! RsiPrintPeriod()
-  if !exists('s:period_start')
-    return '???'
-  endif
-  let secs = localtime() - s:period_start
-  return s:Format(secs)
-endfunction
-
 function s:Format(x)
   let secs = a:x % 60
   let mins = (a:x / 60) % 60
@@ -167,11 +162,16 @@ function s:UpdateStatus(...)
     let status = state .. percentage .. '/10'
   else
     if s:working
-      let status = printf('Stop %dm', (elapsed - period) / 60)
+      let overworked = (elapsed - period) / 60
+      if overworked < 10
+        let status = printf('Stop %dm', overworked)
+      else
+        let status = printf("Stop %dm. Rest. Go water a plant or something.", overworked)
+      endif
     else
       let status = 'Transition'
       augroup RsiTransition
-        autocmd! CursorMoved,CursorMovedI,InsertEnter,InsertLeave * call RsiEnterWork()
+        autocmd! CursorMoved,CursorMovedI,InsertEnter,InsertLeave * call s:EnterWork()
       augroup END
     endif
   endif
@@ -226,7 +226,10 @@ function s:OnActivity(...)
 
   let elapsed = now - s:last_activity
   let s:last_activity = now
-  if elapsed <= g:rsi_reset_secs || !s:working
+  if elapsed >= g:reset_threshold_secs
+    return s:Reset()
+  endif
+  if elapsed <= g:prompt_threshold_secs || !s:working
     return
   endif
 
@@ -241,7 +244,7 @@ function s:OnActivity(...)
     if exists('s:period_start')
       unlet s:period_start
     endif
-    call RsiEnterWork()
+    call s:EnterWork()
   endif
 endfunction
 
@@ -249,7 +252,7 @@ function! s:OnVimEnter()
   call s:RestoreState()
   let expected_date = strftime("%F")
   if !exists('s:stats_start') || strftime("%F", s:stats_start) != expected_date
-    call RsiReset()
+    call s:Reset()
   endif
 
   call s:UpdateStatus()
@@ -272,8 +275,16 @@ function! RsiEnable()
 endfunction
 
 function! RsiEnableOn(ws)
-  " TODO major bug for SSH. sometimes this returns true all the time...
+  " SSH connections will report the same workspace (how you last left your desktop).
+  if !empty($SSH_CONNECTION)
+    return
+  endif
+
   let ws = systemlist("qdbus org.kde.KWin /KWin org.kde.KWin.currentDesktop")
+  if v:shell_error
+    call init#Warn("qdbus command failed!")
+    return
+  endif
   if ws[0] != a:ws
     return
   endif
@@ -296,9 +307,7 @@ function! RsiCompl(ArgLead, CmdLine, CursorPos)
     return []
   endif
   let subc = ["Enable", "Disable", "Reset",
-        \ "EnterWork", "EnterRest",
-        \ "PrintStats", "PrintPeriod",
-        \ "Debug"]
+        \ "EnterWork", "EnterRest", "PrintStats"]
   return filter(subc, 'stridx(v:val, a:ArgLead) >= 0')
 endfunction
 
@@ -306,7 +315,7 @@ function! s:RsiCommand(what)
   if a:what == "Enable"
     call RsiEnable()
   elseif exists('#Rsi#VimLeavePre')
-    call eval("Rsi" .. a:what .. "()")
+    call eval("s:" .. a:what .. "()")
   else
     echo "Rsi plugin is not enabled."
   endif
