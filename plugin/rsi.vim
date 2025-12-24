@@ -53,7 +53,9 @@ function! s:EnterWork()
   call s:UpdateStatus()
 endfunction
 
-function! s:EnterRest()
+function! s:EnterRest(...)
+  " TODO(idea): const retroactive = (a:0 > 0)
+
   let now = localtime()
   let s:last_activity = now
   let s:period_start = now
@@ -91,15 +93,15 @@ function! s:PrintStats()
     let total_work += work_secs
     echo "Worked from " .. strftime("%H:%M", work_point) .. " to " .. strftime("%H:%M", rest_begin) .. "."
     if work_secs > g:rsi_work_secs
-      let msg = "Overworked " .. s:Format(work_secs - g:rsi_work_secs) .. "!"
+      let msg = "Overworked " .. init#PrettyTime(work_secs - g:rsi_work_secs) .. "!"
       call init#Warn(msg)
     endif
     let work_point = rest_end
-    echo "Rested " .. s:Format(rest_secs) .. "."
+    echo "Rested " .. init#PrettyTime(rest_secs) .. "."
   endfor
-  echo "Total working time: " .. s:Format(total_work)
-  echo "Total resting time: " .. s:Format(total_rest)
-  echo "Total: " .. s:Format(total_work + total_rest)
+  echo "Total working time: " .. init#PrettyTime(total_work)
+  echo "Total resting time: " .. init#PrettyTime(total_rest)
+  echo "Total: " .. init#PrettyTime(total_work + total_rest)
 endfunction
 
 function! s:OnVimLeave()
@@ -135,19 +137,6 @@ function! s:RestoreState()
     for varname in keys(dict)
       let s:[varname] = dict[varname]
     endfor
-  endif
-endfunction
-
-function s:Format(x)
-  let secs = a:x % 60
-  let mins = (a:x / 60) % 60
-  let hrs = (a:x / 60 / 60)
-  if hrs > 0
-    return printf("%dh %dm %ds", hrs, mins, secs)
-  elseif mins > 0
-    return printf("%dm %ds", mins, secs)
-  else
-    return printf("%ds", secs)
   endif
 endfunction
 
@@ -200,8 +189,8 @@ function! s:MonitorActivity()
   augroup END
 
   let cmd = ["dbus-monitor", "interface=org.kde.KWin.VirtualDesktopManager,member=currentChanged"]
-  let opts = #{on_stdout: 's:OnActivity'}
-  let s:monitor_job = jobstart(cmd, opts)
+  let opts = #{on_stdout: expand("<SID>") .. 'OnActivity'}
+  let s:monitor_job = init#Jobstart(cmd, opts)
   if s:monitor_job <= 0
     call init#Warn('RSI: Not monitoring for KDE activity')
   endif
@@ -234,9 +223,9 @@ function s:OnActivity(...)
   endif
 
   stopinsert
-  let msg = s:Format(elapsed) .. " passed with no activity (and counting). Mark as rest?"
+  let msg = init#PrettyTime(elapsed) .. " passed with no activity (and counting). Mark as rest?"
   let cmd = ["kdialog", "--yesno", msg]
-  let id = jobstart(cmd)
+  let id = init#Jobstart(cmd)
   let ret = jobwait([id], 10000)[0]
   if ret == 0
     " Recalculate current time
@@ -272,23 +261,6 @@ function! RsiEnable()
       autocmd! VimEnter * ++once call s:OnVimEnter()
     augroup END
   endif
-endfunction
-
-function! RsiEnableOn(ws)
-  " SSH connections will report the same workspace (how you last left your desktop).
-  if !empty($SSH_CONNECTION)
-    return
-  endif
-
-  let ws = systemlist("qdbus org.kde.KWin /KWin org.kde.KWin.currentDesktop")
-  if v:shell_error
-    call init#Warn("qdbus command failed!")
-    return
-  endif
-  if ws[0] != a:ws
-    return
-  endif
-  call RsiEnable()
 endfunction
 
 function! RsiDisable()
