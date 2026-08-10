@@ -1,7 +1,5 @@
 " vim: set sw=2 ts=2 sts=2 foldmethod=marker:
 
-" TODO bug: If i am in transition and a pop appears (for the same duration) that I have rested?
-
 if exists('*RsiStatusline')
   finish
 endif
@@ -16,88 +14,90 @@ function! s:DefineOption(name, def)
   endif
 endfunction
 
-call s:DefineOption('g:rsi_file', 'rsi.txt')
 call s:DefineOption('g:rsi_work_secs', 1680)
 call s:DefineOption('g:rsi_rest_secs', 60)
-call s:DefineOption('g:prompt_threshold_secs', 900)
-call s:DefineOption('g:reset_threshold_secs', 28800)
+call s:DefineOption('g:rsi_rest_threshold', 900)
+call s:DefineOption('g:rsi_reset_threshold', 14400)
 
-let s:rsi_file = stdpath("state") .. "/rsi.txt"
+let s:rsi_dir = stdpath("state") .. "/rsi"
+let s:bootstrap = expand('<sfile>:p:h') .. "/bootstrap.txt"
 
-function! RsiDebug()
+call mkdir(s:rsi_dir, "p")
+
+function! s:StateFiles()
+  return glob(s:rsi_dir .. "/*.txt", 0, 1)
+endfunction
+
+function! rsi#Debug()
   return deepcopy(s:)
 endfunction
 
-function! s:Reset()
-  let s:rests_made = []
-  let s:stats_start = localtime()
-  if exists('s:period_start')
-    unlet s:period_start
-  endif
-  call s:EnterWork()
+function! rsi#OpenStateFile()
+  let files = s:StateFiles()
+  call qutil#DropInQuickfix(files, 'State files')
+endfunction
+
+function! rsi#Reset()
+  let s:history = []
+  call s:WorkSilent()
   call s:FlushState()
 endfunction
 
-function! s:EnterWork()
+function! rsi#Work()
+  let now = localtime()
+  if s:state_machine == 'resting'
+    call add(s:history, [s:state_machine, s:period_begin, now])
+  endif
+  call s:WorkSilent(now)
+  call s:FlushState()
+endfunction
+
+function! s:WorkSilent(...)
   augroup RsiTransition
     autocmd!
   augroup END
 
-  let now = localtime()
-  if exists('s:period_start')
-    call s:RegisterRestPeriod(s:period_start, now)
-  endif
+  let now = get(a:000, 0, localtime())
   let s:last_activity = now
-  let s:period_start = now
-  let s:working = 1
-  call s:UpdateStatus()
+  let s:period_begin = now
+  let s:state_machine = 'working'
+  call s:UpdateStatusline()
 endfunction
 
-function! s:EnterRest(...)
-  " TODO(idea): const retroactive = (a:0 > 0)
-
+function! rsi#Rest()
   let now = localtime()
+  if s:state_machine == 'working'
+    call add(s:history, [s:state_machine, s:period_begin, now])
+  endif
+
   let s:last_activity = now
-  let s:period_start = now
-  let s:working = 0
-  call s:UpdateStatus()
+  let s:period_begin = now
+  let s:state_machine = 'resting'
+  call s:FlushState()
 endfunction
 
-function! s:RegisterRestPeriod(from, to)
-  if !exists('s:rests_made')
-    let s:rests_made = []
-  endif
-  if a:from >= a:to
-    call init#Warn('RSI: Dropping invalid rest period (internal bug)!')
-  elseif len(s:rests_made) > 0 && s:rests_made[-1][1] > a:from
-    call init#Warn('RSI: Dropping invalid rest period (race condition)!')
-  else
-    call add(s:rests_made, [a:from, a:to])
-  endif
-endfunction
-
-function! s:PrintStats()
-  if get(s:, 'rests_made', []) == []
-    echo "No stats"
+function! rsi#Print()
+  if empty(s:history)
+    echo "No history"
     return
   endif
-  echo "RSI stats..."
+  echo "RSI history..."
 
   let total_rest = 0
   let total_work = 0
-  let work_point = s:stats_start
-  for [rest_begin, rest_end] in s:rests_made
-    let rest_secs = rest_end - rest_begin
-    let total_rest += rest_secs
-    let work_secs = rest_begin - work_point
-    let total_work += work_secs
-    echo "Worked from " .. strftime("%H:%M", work_point) .. " to " .. strftime("%H:%M", rest_begin) .. "."
-    if work_secs > g:rsi_work_secs
-      let msg = "Overworked " .. init#PrettyTime(work_secs - g:rsi_work_secs) .. "!"
-      call init#Warn(msg)
+  for [type, begin, end] in s:history
+    let secs = end - begin
+    if type == 'resting'
+      let total_rest += secs
+      echo printf("Rested %s.", init#PrettyTime(secs))
+    else
+      let total_work += secs
+      echo printf("Worked from %s to %s.", strftime("%H:%M", begin), strftime("%H:%M", end))
+      if secs > g:rsi_work_secs
+        let msg = printf("Overworked %s!", init#PrettyTime(secs - g:rsi_work_secs))
+        call init#Warn(msg)
+      endif
     endif
-    let work_point = rest_end
-    echo "Rested " .. init#PrettyTime(rest_secs) .. "."
   endfor
   echo "Total working time: " .. init#PrettyTime(total_work)
   echo "Total resting time: " .. init#PrettyTime(total_rest)
@@ -105,6 +105,8 @@ function! s:PrintStats()
 endfunction
 
 function! s:OnVimLeave()
+  let g:statusline_dict['rsi'] = ''
+
   if exists('s:status_timer')
     call timer_stop(s:status_timer)
   endif
@@ -114,59 +116,87 @@ function! s:OnVimLeave()
   if exists('s:monitor_job')
     call jobstop(s:monitor_job)
   endif
+  if exists('s:watch_job')
+    call jobstop(s:watch_job)
+  endif
   call s:FlushState()
 endfunction
 
 function! s:FlushState()
-  " Write out all script local variables
-  let dict = filter(copy(s:), 'index(s:SavedVars(), v:key) >= 0')
-  call writefile([string(dict)], s:rsi_file)
-endfunction
+  call s:UpdateStatusline()
 
-function! s:SavedVars()
-  return ['rests_made', 'stats_start', 'period_start', 'working', 'last_activity']
+  const vars = ['history', 'period_begin', 'state_machine', 'last_activity']
+  let dict = filter(copy(s:), 'index(vars, v:key) >= 0')
+  " Sort the items for a stable representation.
+  let content = string(sort(items(dict)))
+  let new_file = printf("%s/%s.txt", s:rsi_dir, sha256(content))
+
+  " State unchanged (same hash): nothing to do, only spurious triggers land here.
+  if filereadable(new_file)
+    return
+  endif
+
+  " Atomic swap: publish the new state, then claim it by deleting the previous
+  " file. delete() succeeds for exactly one racer, so if it fails someone else
+  " already swapped -- adopt their state and drop our own.
+  call writefile([content], new_file)
+
+  let old_file = s:rsi_file
+  let s:rsi_file = new_file
+  if delete(old_file) != 0
+    call delete(new_file)
+    call s:RestoreState()
+  endif
 endfunction
 
 function! s:RestoreState()
-  if !filereadable(s:rsi_file)
+  let files = s:StateFiles()
+  if len(files) != 1
+    " Wait for the directory to settle back to a single file.
     return
   endif
+  if exists('s:rsi_file') && filereadable(s:rsi_file)
+    " Already loaded
+    return
+  endif
+
+  let s:rsi_file = files[0]
   let cache = readfile(s:rsi_file)
   if len(cache) > 0
-    let dict = eval(cache[0])
-    for varname in keys(dict)
-      let s:[varname] = dict[varname]
+    for [varname, value] in eval(cache[0])
+      let s:[varname] = value
     endfor
   endif
 endfunction
 
-function s:UpdateStatus(...)
+function s:UpdateStatusline(...)
   let now = localtime()
-  let elapsed = now - s:period_start
-  let period = s:working ? g:rsi_work_secs : g:rsi_rest_secs
-  let percentage = elapsed * 10 / period
-  let expired = elapsed >= period
+  let elapsed = now - s:period_begin
+  let working = s:state_machine == 'working'
+  let max_secs = working ? g:rsi_work_secs : g:rsi_rest_secs
+  let percentage = elapsed * 10 / max_secs
+  let expired = elapsed >= max_secs
   if !expired
-    let state = s:working ? "Working " : "Resting "
-    let status = state .. percentage .. '/10'
+    let description = working ? "Working " : "Resting "
+    let statusline = description .. percentage .. '/10'
   else
-    if s:working
-      let overworked = (elapsed - period) / 60
+    if working
+      let overworked = (elapsed - max_secs) / 60
       if overworked < 10
-        let status = printf('Stop %dm', overworked)
+        let statusline = printf('Stop %dm', overworked)
       else
-        let status = printf("Stop %dm. Rest. Go water a plant or something.", overworked)
+        let statusline = printf("Stop %dm. Rest. Go water a plant or something.", overworked)
       endif
     else
-      let status = 'Transition'
+      let statusline = 'Transition'
       augroup RsiTransition
-        autocmd! CursorMoved,CursorMovedI,InsertEnter,InsertLeave * call s:EnterWork()
+        autocmd! CursorMoved,CursorMovedI,InsertEnter,InsertLeave * call rsi#Work()
       augroup END
     endif
   endif
 
-  if !has_key(g:statusline_dict, 'rsi') || g:statusline_dict['rsi'] != status
-    let g:statusline_dict['rsi'] = status
+  if !has_key(g:statusline_dict, 'rsi') || g:statusline_dict['rsi'] != statusline
+    let g:statusline_dict['rsi'] = statusline
   endif
 endfunction
 
@@ -183,87 +213,82 @@ function! s:TickRate()
   return tick_msec
 endfunction
 
-function! s:MonitorActivity()
+function! s:MonitorX11()
   augroup Rsi
     autocmd! CursorMoved,CursorMovedI,CmdlineChanged,InsertEnter,InsertLeave * call s:OnActivity()
   augroup END
 
-  let cmd = ["dbus-monitor", "interface=org.kde.KWin.VirtualDesktopManager,member=currentChanged"]
+  let cmd = ["xprop", "-root", "-spy", "_NET_CURRENT_DESKTOP"]
   let opts = #{on_stdout: expand("<SID>") .. 'OnActivity'}
   let s:monitor_job = init#Jobstart(cmd, opts)
   if s:monitor_job <= 0
-    call init#Warn('RSI: Not monitoring for KDE activity')
+    call init#Warn('RSI: Not monitoring for workspace activity')
+  endif
+  call s:OnActivity()
+endfunction
+
+function! s:WatchStateFile()
+  let cmd = ["inotifywait", "--monitor", "--event", "delete", s:rsi_dir]
+  let opts = #{on_stdout: expand("<SID>") .. 'OnFileChanged'}
+  let s:watch_job = init#Jobstart(cmd, opts)
+  if s:watch_job <= 0
+    call init#Warn('RSI: Not watching state file')
   endif
 endfunction
 
-function s:UpdateLastActivity()
-  let s:last_activity = localtime()
-endfunction
-
-function s:CheckInactivity()
-  if exists('s:last_activity')
-    let now = localtime()
-  endif
+function s:OnFileChanged(...)
+  call s:RestoreState()
+  call s:UpdateStatusline()
 endfunction
 
 function s:OnActivity(...)
   let now = localtime()
-  if !exists('s:last_activity')
-    let s:last_activity = now
-    return
-  endif
-
-  let elapsed = now - s:last_activity
+  let prev_activity = s:last_activity
   let s:last_activity = now
-  if elapsed >= g:reset_threshold_secs
-    return s:Reset()
-  endif
-  if elapsed <= g:prompt_threshold_secs || !s:working
-    return
+
+  let idle_time = now - prev_activity
+  if idle_time >= g:rsi_reset_threshold
+    return rsi#Reset()
   endif
 
-  stopinsert
-  let msg = init#PrettyTime(elapsed) .. " passed with no activity (and counting). Mark as rest?"
-  let cmd = ["kdialog", "--yesno", msg]
-  let id = init#Jobstart(cmd)
-  let ret = jobwait([id], 10000)[0]
-  if ret == 0
-    " Recalculate current time
-    call s:RegisterRestPeriod(now - elapsed, localtime())
-    if exists('s:period_start')
-      unlet s:period_start
-    endif
-    call s:EnterWork()
+  let in_transition = get(g:statusline_dict, 'rsi', '') == 'Transition'
+  if in_transition
+    return rsi#Work()
+  endif
+
+  if s:state_machine == 'working' && idle_time > g:rsi_rest_threshold
+    call add(s:history, ['working', s:period_begin, prev_activity])
+    call add(s:history, ['resting', prev_activity, now])
+    call s:WorkSilent(now)
+    call s:FlushState()
   endif
 endfunction
 
 function! s:OnVimEnter()
-  call s:RestoreState()
-  let expected_date = strftime("%F")
-  if !exists('s:stats_start') || strftime("%F", s:stats_start) != expected_date
-    call s:Reset()
+  if empty(s:StateFiles())
+    " First run: seed from the bootstrap shipped next to this script. Its stale
+    " timestamps make the OnActivity() in MonitorX11 reset it to fresh state at
+    " once, so it's just a placeholder that gets replaced immediately.
+    call writefile(readfile(s:bootstrap), s:rsi_dir .. "/bootstrap.txt")
   endif
 
-  call s:UpdateStatus()
-  let s:status_timer = timer_start(s:TickRate(), 's:UpdateStatus', #{repeat: -1})
-  call s:MonitorActivity()
+  call s:RestoreState()
+  if !exists('s:rsi_file')
+    call init#Warn('RSI: unlikely bug observed - restart Vim.')
+    return
+  endif
+
+  let s:status_timer = timer_start(s:TickRate(), 's:UpdateStatusline', #{repeat: -1})
+  call s:MonitorX11()
+  call s:WatchStateFile()
+  call s:UpdateStatusline()
 
   augroup Rsi
     autocmd! VimLeavePre * ++once call s:OnVimLeave()
   augroup END
 endfunction
 
-function! RsiEnable()
-  if v:vim_did_enter
-    call s:OnVimEnter()
-  else
-    augroup Rsi
-      autocmd! VimEnter * ++once call s:OnVimEnter()
-    augroup END
-  endif
-endfunction
-
-function! RsiDisable()
+function! rsi#Disable()
   augroup Rsi
     autocmd!
   augroup END
@@ -271,26 +296,8 @@ function! RsiDisable()
     autocmd!
   augroup END
   call s:OnVimLeave()
-  let g:statusline_dict['rsi'] = ''
 endfunction
 
-function! RsiCompl(ArgLead, CmdLine, CursorPos)
-  if a:CursorPos < len(a:CmdLine)
-    return []
-  endif
-  let subc = ["Enable", "Disable", "Reset",
-        \ "EnterWork", "EnterRest", "PrintStats"]
-  return filter(subc, 'stridx(v:val, a:ArgLead) >= 0')
-endfunction
-
-function! s:RsiCommand(what)
-  if a:what == "Enable"
-    call RsiEnable()
-  elseif exists('#Rsi#VimLeavePre')
-    call eval("s:" .. a:what .. "()")
-  else
-    echo "Rsi plugin is not enabled."
-  endif
-endfunction
-
-command! -nargs=1 -complete=customlist,RsiCompl Rsi call s:RsiCommand(<q-args>)
+augroup Rsi
+  autocmd! VimEnter * ++once call s:OnVimEnter()
+augroup END
