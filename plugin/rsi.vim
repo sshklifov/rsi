@@ -21,6 +21,7 @@ call s:DefineOption('g:rsi_reset_threshold', 14400)
 
 let s:rsi_dir = stdpath("state") .. "/rsi"
 let s:bootstrap = expand('<sfile>:p:h') .. "/bootstrap.txt"
+let s:idle = expand('<sfile>:p:h') .. "/idle.py"
 
 call mkdir(s:rsi_dir, "p")
 
@@ -370,18 +371,36 @@ function! s:TickRate()
   return tick_msec
 endfunction
 
-function! s:MonitorX11()
+function! s:MonitorActivity()
   augroup Rsi
     autocmd! CursorMoved,CursorMovedI,CmdlineChanged,InsertEnter,InsertLeave * call s:OnActivity()
   augroup END
 
-  let cmd = ["xprop", "-root", "-spy", "_NET_CURRENT_DESKTOP"]
-  let opts = #{on_stdout: expand("<SID>") .. 'OnActivity'}
+  " A workspace switch is not the only thing that happens outside this window:
+  " an hour of reading in a browser is work too, and nothing in here can hear
+  " it. The helper reports what the X server saw, on the tick we already keep.
+  let cmd = ["python3", s:idle, printf("%.3f", s:TickRate() / 1000.0)]
+  let opts = #{on_stdout: expand("<SID>") .. 'OnIdleReport'}
   let s:monitor_job = init#Jobstart(cmd, opts)
   if s:monitor_job <= 0
-    call init#Warn('RSI: Not monitoring for workspace activity')
+    call init#Warn('RSI: Not monitoring for input outside Vim')
   endif
   call s:OnActivity()
+endfunction
+
+" Idle milliseconds, so the last input is that far back. Only a moment we have
+" not counted yet is news; while nobody touches anything it stays put, which is
+" exactly how being away is supposed to look.
+function s:OnIdleReport(id, data, event)
+  for line in a:data
+    if line !~ '^\d\+$'
+      continue
+    endif
+    let input = localtime() - str2nr(line) / 1000
+    if input > s:last_activity
+      call s:Activity(input)
+    endif
+  endfor
 endfunction
 
 function! s:WatchStateFile()
@@ -398,12 +417,17 @@ function s:OnFileChanged(...)
   call s:UpdateStatusline()
 endfunction
 
+" Vim's own events are a lower bound on activity: they say when something
+" happened in here, never when nothing happened anywhere.
 function s:OnActivity(...)
-  let now = localtime()
-  let prev_activity = s:last_activity
-  let s:last_activity = now
+  call s:Activity(localtime())
+endfunction
 
-  let idle_time = now - prev_activity
+function s:Activity(now)
+  let prev_activity = s:last_activity
+  let s:last_activity = a:now
+
+  let idle_time = a:now - prev_activity
   if idle_time >= g:rsi_reset_threshold
     return rsi#Reset()
   endif
@@ -416,8 +440,8 @@ function s:OnActivity(...)
     if split > s:period_begin
       call add(s:history, ['working', s:period_begin, split])
     endif
-    call add(s:history, ['resting', split, now])
-    call s:WorkSilent(now)
+    call add(s:history, ['resting', split, a:now])
+    call s:WorkSilent(a:now)
     call s:FlushState()
     return
   endif
@@ -430,8 +454,8 @@ endfunction
 function! s:OnVimEnter()
   if empty(s:StateFiles())
     " First run: seed from the bootstrap shipped next to this script. Its stale
-    " timestamps make the OnActivity() in MonitorX11 reset it to fresh state at
-    " once, so it's just a placeholder that gets replaced immediately.
+    " timestamps make the OnActivity() in MonitorActivity reset it to fresh
+    " state at once, so it's just a placeholder that gets replaced immediately.
     call writefile(readfile(s:bootstrap), s:rsi_dir .. "/bootstrap.txt")
   endif
 
@@ -442,7 +466,7 @@ function! s:OnVimEnter()
   endif
 
   let s:status_timer = timer_start(s:TickRate(), 's:UpdateStatusline', #{repeat: -1})
-  call s:MonitorX11()
+  call s:MonitorActivity()
   call s:WatchStateFile()
   call s:UpdateStatusline()
 
