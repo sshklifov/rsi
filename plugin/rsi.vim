@@ -391,6 +391,8 @@ endfunction
 " Idle milliseconds, so the last input is that far back. Only a moment we have
 " not counted yet is news; while nobody touches anything it stays put, which is
 " exactly how being away is supposed to look.
+" A line that is not a number is a poll that found the screen locked, and input
+" the lock screen swallowed is not ours to count.
 function s:OnIdleReport(id, data, event)
   for line in a:data
     if line !~ '^\d\+$'
