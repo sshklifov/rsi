@@ -317,6 +317,17 @@ function! s:RestoreState()
     for [varname, value] in eval(cache[0])
       let s:[varname] = value
     endfor
+
+    " The file's last_activity is only as fresh as whoever wrote it last, so it
+    " says when this state was last true -- not when anybody last touched a key.
+    " Staleness is exactly the question the day boundary asks, and exactly the
+    " wrong one to ask about a rest: measuring the next keystroke against it is
+    " how a second instance used to invent an afternoon off.
+    let stale = localtime() - s:last_activity
+    let s:last_activity = localtime()
+    if stale >= g:rsi_reset_threshold
+      call rsi#Reset()
+    endif
   endif
 endfunction
 
