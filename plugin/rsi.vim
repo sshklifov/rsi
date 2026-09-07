@@ -417,7 +417,16 @@ function s:OnIdleReport(id, data, event)
 endfunction
 
 function! s:WatchStateFile()
-  let cmd = ["inotifywait", "--monitor", "--event", "delete", s:rsi_dir]
+  " fswatch is the macOS/BSD equivalent of inotifywait (brew install fswatch).
+  if executable('inotifywait')
+    let cmd = ["inotifywait", "--monitor", "--event", "delete", s:rsi_dir]
+  elseif executable('fswatch')
+    let cmd = ["fswatch", "--event", "Removed", s:rsi_dir]
+  else
+    call init#Warn('RSI: Not watching state file (no inotifywait or fswatch)')
+    return
+  endif
+
   let opts = #{on_stdout: expand("<SID>") .. 'OnFileChanged'}
   let s:watch_job = init#Jobstart(cmd, opts)
   if s:watch_job <= 0
